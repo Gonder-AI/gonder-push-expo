@@ -1,0 +1,52 @@
+{
+  "name": "@gonderai/expo-push",
+  "version": "0.2.0",
+  "description": "Official G\u00f6nder push SDK for Expo (iOS & Android)",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "react-native": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "plugin",
+    "app.plugin.js"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --external expo-notifications --external react-native --external @react-native-async-storage/async-storage",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch --external expo-notifications --external react-native --external @react-native-async-storage/async-storage",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "gonder",
+    "expo",
+    "push",
+    "notifications",
+    "react-native",
+    "fcm",
+    "apns"
+  ],
+  "author": "G\u00f6nder",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/brerdem/expo-push"
+  },
+  "dependencies": {
+    "@expo/config-plugins": "^9.1.7"
+  },
+  "peerDependencies": {
+    "@react-native-async-storage/async-storage": ">=1.17.0",
+    "expo": ">=49.0.0",
+    "expo-notifications": ">=0.20.0",
+    "react-native": "*"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
