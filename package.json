@@ -1,6 +1,6 @@
 {
   "name": "@gonderai/expo-push",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Official G\u00f6nder push SDK for Expo (iOS & Android)",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -30,7 +30,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Gonder-AI/gonder-push-expo"
+    "url": "git+https://github.com/Gonder-AI/gonder-push-expo.git"
   },
   "dependencies": {
     "@expo/config-plugins": "^9.1.7"
