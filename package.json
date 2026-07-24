@@ -30,7 +30,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/brerdem/expo-push"
+    "url": "https://github.com/Gonder-AI/gonder-push-expo"
   },
   "dependencies": {
     "@expo/config-plugins": "^9.1.7"
