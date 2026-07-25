@@ -1,6 +1,6 @@
 {
   "name": "@gonderai/expo-push",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Official G\u00f6nder push SDK for Expo (iOS & Android)",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -12,8 +12,8 @@
     "app.plugin.js"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts --external expo-notifications --external react-native --external @react-native-async-storage/async-storage",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch --external expo-notifications --external react-native --external @react-native-async-storage/async-storage",
+    "build": "tsup src/index.ts --format cjs,esm --dts --external expo-notifications --external expo-device --external react-native --external @react-native-async-storage/async-storage",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch --external expo-notifications --external expo-device --external react-native --external @react-native-async-storage/async-storage",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run build"
   },
@@ -38,8 +38,14 @@
   "peerDependencies": {
     "@react-native-async-storage/async-storage": ">=1.17.0",
     "expo": ">=49.0.0",
+    "expo-device": ">=5.0.0",
     "expo-notifications": ">=0.20.0",
     "react-native": "*"
+  },
+  "peerDependenciesMeta": {
+    "expo-device": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/react": "^19",

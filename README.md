@@ -7,8 +7,11 @@ Uses **native device tokens** via `expo-notifications` `getDevicePushTokenAsync(
 ## Install
 
 ```bash
-npx expo install @gonderai/expo-push expo-notifications @react-native-async-storage/async-storage
+npx expo install @gonderai/expo-push expo-notifications @react-native-async-storage/async-storage expo-device
 ```
+
+`expo-device` is optional but recommended — without it the SDK cannot report the
+iOS hardware model, so those subscribers show up without a device name.
 
 Add the config plugin to `app.json` / `app.config.js`:
 
@@ -64,7 +67,27 @@ await GonderPush.logout();
 | `setConsentRequired` / `setConsentGiven` | Privacy gate for network calls |
 | `setLogLevel` / `addDebugListener` | Debugging |
 | `unsubscribe` / `clearAllNotifications` | Cleanup |
-| `getDeviceId` / `getDeviceToken` | Device identity |
+| `getDeviceId` / `getDeviceToken` / `getSubscriptionId` | Device identity |
+
+## Subscription ID
+
+Every installation gets a Gönder **subscription id** on its first successful
+registration. It is the identifier shown in the dashboard's Subscribers table and
+the stable handle to use when referencing a device from your backend.
+
+```ts
+GonderPush.getSubscriptionId(); // null until the first register call succeeds
+
+GonderPush.addSubscriptionObserver((state) => {
+  console.log(state.subscriptionId, state.externalId);
+});
+```
+
+## Reported device context
+
+Alongside the push token the SDK reports device model, manufacturer, OS name and
+version, language and timezone so subscribers can be segmented and identified in
+the dashboard. No advertising id and no contact data are collected.
 
 ## App ID
 

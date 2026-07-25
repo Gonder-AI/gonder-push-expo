@@ -56,6 +56,8 @@ export interface PushSubscriptionState {
   deviceToken: string | null;
   optedIn: boolean;
   externalId: string | null;
+  /** Gönder subscription id for this installation, assigned on first register. */
+  subscriptionId: string | null;
 }
 
 export type ClickListener = (notification: GonderNotification) => void;
@@ -72,6 +74,7 @@ const STORAGE_APP_ID = "gonder.push.appId";
 const STORAGE_BASE_URL = "gonder.push.baseUrl";
 const STORAGE_EXTERNAL_ID = "gonder.push.externalId";
 const STORAGE_DEVICE_TOKEN = "gonder.push.deviceToken";
+const STORAGE_SUBSCRIPTION_ID = "gonder.push.subscriptionId";
 const STORAGE_OPTED_IN = "gonder.push.optedIn";
 const STORAGE_TAGS = "gonder.push.tags";
 const STORAGE_CONSENT_REQUIRED = "gonder.push.consentRequired";
@@ -84,6 +87,7 @@ let baseUrl: string = DEFAULT_BASE_URL;
 let externalId: string | null = null;
 let deviceToken: string | null = null;
 let deviceIdCache: string | null = null;
+let subscriptionId: string | null = null;
 let optedIn = true;
 let tags: Record<string, string> = {};
 let consentRequired = false;
@@ -181,6 +185,7 @@ function subscriptionState(): PushSubscriptionState {
     deviceToken,
     optedIn,
     externalId,
+    subscriptionId,
   };
 }
 
@@ -234,13 +239,14 @@ function toGonderNotification(
   };
 }
 
+/** Returns the parsed JSON body on success, `null` otherwise. */
 async function post(
   path: string,
   body: Record<string, unknown>
-): Promise<void> {
+): Promise<Record<string, unknown> | null> {
   if (!canSendNetwork()) {
     debugLog(`${path} skipped — consent required but not given`, LogLevel.Info);
-    return;
+    return null;
   }
   const url = `${baseUrl}${path}`;
   debugLog(`POST ${path} → ${baseUrl}`, LogLevel.Verbose);
@@ -251,16 +257,121 @@ async function post(
       body: JSON.stringify(body),
     });
     const text = await response.text();
-    if (response.ok) {
-      debugLog(`${path} ok (${response.status})`, LogLevel.Debug);
-    } else {
+    if (!response.ok) {
       debugLog(
         `${path} HTTP ${response.status}: ${text.slice(0, 120)}`,
         LogLevel.Error
       );
+      return null;
+    }
+    debugLog(`${path} ok (${response.status})`, LogLevel.Debug);
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return null;
     }
   } catch (error) {
     debugLog(`${path} failed: ${String(error)}`, LogLevel.Error);
+    return null;
+  }
+}
+
+interface DeviceContext {
+  deviceModel?: string;
+  deviceManufacturer?: string;
+  osName?: string;
+  osVersion?: string;
+  osApiLevel?: number;
+}
+
+/**
+ * Hardware and OS details for the Subscribers dashboard.
+ *
+ * `expo-device` gives the richest data (iOS hardware identifiers like
+ * `iPhone16,2`), but it is optional — React Native's `Platform.constants`
+ * covers Android fully and iOS partially when it is not installed.
+ */
+function collectDeviceContext(): DeviceContext {
+  const context: DeviceContext = {};
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const required = require("expo-device") as Record<string, unknown> & {
+      default?: Record<string, unknown>;
+    };
+    const Device = (required.default ?? required) as {
+      modelId?: string | null;
+      modelName?: string | null;
+      manufacturer?: string | null;
+      osName?: string | null;
+      osVersion?: string | null;
+      platformApiLevel?: number | null;
+    };
+    // modelId is the raw identifier on iOS and empty on Android.
+    const model = Device.modelId || Device.modelName;
+    if (model) context.deviceModel = model;
+    if (Device.manufacturer) context.deviceManufacturer = Device.manufacturer;
+    if (Device.osName) context.osName = Device.osName;
+    if (Device.osVersion) context.osVersion = Device.osVersion;
+    if (typeof Device.platformApiLevel === "number") {
+      context.osApiLevel = Device.platformApiLevel;
+    }
+  } catch {
+    // expo-device is an optional peer dependency
+  }
+
+  // Narrow view of react-native's Platform: `constants` and `Version` are not
+  // in every @types/react-native version this package builds against.
+  const runtime = Platform as unknown as {
+    Version?: string | number;
+    constants?: {
+      Model?: string;
+      Manufacturer?: string;
+      Brand?: string;
+      Release?: string;
+      Version?: number;
+      systemName?: string;
+      osVersion?: string;
+    };
+  };
+  const constants = runtime.constants;
+
+  if (Platform.OS === "android") {
+    context.deviceModel = context.deviceModel || constants?.Model;
+    context.deviceManufacturer =
+      context.deviceManufacturer || constants?.Manufacturer || constants?.Brand;
+    context.osVersion = context.osVersion || constants?.Release;
+    if (context.osApiLevel === undefined && typeof constants?.Version === "number") {
+      context.osApiLevel = constants.Version;
+    }
+    context.osName = context.osName || "Android";
+  } else {
+    context.deviceManufacturer = context.deviceManufacturer || "Apple";
+    context.osVersion =
+      context.osVersion ||
+      constants?.osVersion ||
+      (runtime.Version !== undefined ? String(runtime.Version) : undefined);
+    context.osName = context.osName || constants?.systemName || "iOS";
+  }
+
+  return context;
+}
+
+function deviceTimezone(): { timezone?: string; offsetMinutes: number } {
+  let timezone: string | undefined;
+  try {
+    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    timezone = undefined;
+  }
+  return { timezone, offsetMinutes: -new Date().getTimezoneOffset() };
+}
+
+function deviceLanguage(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -270,6 +381,8 @@ async function sendRegistration(token: string): Promise<void> {
     return;
   }
   const id = await ensureDeviceId();
+  const language = deviceLanguage();
+  const { timezone, offsetMinutes } = deviceTimezone();
   const body: Record<string, unknown> = {
     appId,
     deviceToken: token,
@@ -277,9 +390,13 @@ async function sendRegistration(token: string): Promise<void> {
     platform: mobilePlatform(),
     sdk: "expo",
     environment: environment(),
-    locale: Intl.DateTimeFormat().resolvedOptions().locale || undefined,
+    locale: language,
+    language,
+    timezone,
+    timezoneOffsetMinutes: offsetMinutes,
     optedIn,
     tags,
+    ...collectDeviceContext(),
   };
   if (externalId) {
     body.externalId = externalId;
@@ -309,7 +426,22 @@ async function sendRegistration(token: string): Promise<void> {
   } catch {
     // optional
   }
-  await post("/api/mobile-push/register", body);
+  const response = await post("/api/mobile-push/register", body);
+  await handleRegistrationResponse(response);
+}
+
+/** Persists the subscription id the backend assigned to this installation. */
+async function handleRegistrationResponse(
+  response: Record<string, unknown> | null
+): Promise<void> {
+  const data = response?.data as Record<string, unknown> | undefined;
+  const identifier = data?.subscriptionId ?? data?.subscriberId;
+  if (typeof identifier !== "string" || identifier.length === 0) return;
+  if (identifier === subscriptionId) return;
+  subscriptionId = identifier;
+  await persist(STORAGE_SUBSCRIPTION_ID, identifier);
+  debugLog(`subscriptionId=${identifier}`, LogLevel.Info);
+  notifySubscriptionObservers();
 }
 
 async function sendUnregister(): Promise<void> {
@@ -438,6 +570,7 @@ async function initialize(options: GonderPushInitOptions): Promise<void> {
 
   externalId = await read(STORAGE_EXTERNAL_ID);
   deviceToken = await read(STORAGE_DEVICE_TOKEN);
+  subscriptionId = await read(STORAGE_SUBSCRIPTION_ID);
   const storedOptedIn = await read(STORAGE_OPTED_IN);
   optedIn = storedOptedIn !== "false";
   const storedTags = await read(STORAGE_TAGS);
@@ -686,6 +819,14 @@ function getDeviceToken(): string | null {
   return deviceToken;
 }
 
+/**
+ * Gönder subscription id for this installation. Null until the first successful
+ * registration; shown as "Subscription ID" in the dashboard.
+ */
+function getSubscriptionId(): string | null {
+  return subscriptionId;
+}
+
 function addClickListener(listener: ClickListener): () => void {
   clickListeners.add(listener);
   ensureNotificationHandlers();
@@ -759,6 +900,7 @@ export const GonderPush = {
   setLogLevel,
   getDeviceId,
   getDeviceToken,
+  getSubscriptionId,
   addClickListener,
   addForegroundLifecycleListener,
   addPermissionObserver,

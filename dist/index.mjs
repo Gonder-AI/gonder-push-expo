@@ -26,6 +26,7 @@ var STORAGE_APP_ID = "gonder.push.appId";
 var STORAGE_BASE_URL = "gonder.push.baseUrl";
 var STORAGE_EXTERNAL_ID = "gonder.push.externalId";
 var STORAGE_DEVICE_TOKEN = "gonder.push.deviceToken";
+var STORAGE_SUBSCRIPTION_ID = "gonder.push.subscriptionId";
 var STORAGE_OPTED_IN = "gonder.push.optedIn";
 var STORAGE_TAGS = "gonder.push.tags";
 var STORAGE_CONSENT_REQUIRED = "gonder.push.consentRequired";
@@ -36,6 +37,7 @@ var baseUrl = DEFAULT_BASE_URL;
 var externalId = null;
 var deviceToken = null;
 var deviceIdCache = null;
+var subscriptionId = null;
 var optedIn = true;
 var tags = {};
 var consentRequired = false;
@@ -119,7 +121,8 @@ function subscriptionState() {
     deviceId: deviceIdCache || "",
     deviceToken,
     optedIn,
-    externalId
+    externalId,
+    subscriptionId
   };
 }
 function notifySubscriptionObservers() {
@@ -162,7 +165,7 @@ function toGonderNotification(content) {
 async function post(path, body) {
   if (!canSendNetwork()) {
     debugLog(`${path} skipped \u2014 consent required but not given`, 3 /* Info */);
-    return;
+    return null;
   }
   const url = `${baseUrl}${path}`;
   debugLog(`POST ${path} \u2192 ${baseUrl}`, 5 /* Verbose */);
@@ -173,16 +176,70 @@ async function post(path, body) {
       body: JSON.stringify(body)
     });
     const text = await response.text();
-    if (response.ok) {
-      debugLog(`${path} ok (${response.status})`, 4 /* Debug */);
-    } else {
+    if (!response.ok) {
       debugLog(
         `${path} HTTP ${response.status}: ${text.slice(0, 120)}`,
         1 /* Error */
       );
+      return null;
+    }
+    debugLog(`${path} ok (${response.status})`, 4 /* Debug */);
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
     }
   } catch (error) {
     debugLog(`${path} failed: ${String(error)}`, 1 /* Error */);
+    return null;
+  }
+}
+function collectDeviceContext() {
+  const context = {};
+  try {
+    const required = __require("expo-device");
+    const Device = required.default ?? required;
+    const model = Device.modelId || Device.modelName;
+    if (model) context.deviceModel = model;
+    if (Device.manufacturer) context.deviceManufacturer = Device.manufacturer;
+    if (Device.osName) context.osName = Device.osName;
+    if (Device.osVersion) context.osVersion = Device.osVersion;
+    if (typeof Device.platformApiLevel === "number") {
+      context.osApiLevel = Device.platformApiLevel;
+    }
+  } catch {
+  }
+  const runtime = Platform;
+  const constants = runtime.constants;
+  if (Platform.OS === "android") {
+    context.deviceModel = context.deviceModel || constants?.Model;
+    context.deviceManufacturer = context.deviceManufacturer || constants?.Manufacturer || constants?.Brand;
+    context.osVersion = context.osVersion || constants?.Release;
+    if (context.osApiLevel === void 0 && typeof constants?.Version === "number") {
+      context.osApiLevel = constants.Version;
+    }
+    context.osName = context.osName || "Android";
+  } else {
+    context.deviceManufacturer = context.deviceManufacturer || "Apple";
+    context.osVersion = context.osVersion || constants?.osVersion || (runtime.Version !== void 0 ? String(runtime.Version) : void 0);
+    context.osName = context.osName || constants?.systemName || "iOS";
+  }
+  return context;
+}
+function deviceTimezone() {
+  let timezone;
+  try {
+    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || void 0;
+  } catch {
+    timezone = void 0;
+  }
+  return { timezone, offsetMinutes: -(/* @__PURE__ */ new Date()).getTimezoneOffset() };
+}
+function deviceLanguage() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || void 0;
+  } catch {
+    return void 0;
   }
 }
 async function sendRegistration(token) {
@@ -191,6 +248,8 @@ async function sendRegistration(token) {
     return;
   }
   const id = await ensureDeviceId();
+  const language = deviceLanguage();
+  const { timezone, offsetMinutes } = deviceTimezone();
   const body = {
     appId,
     deviceToken: token,
@@ -198,9 +257,13 @@ async function sendRegistration(token) {
     platform: mobilePlatform(),
     sdk: "expo",
     environment: environment(),
-    locale: Intl.DateTimeFormat().resolvedOptions().locale || void 0,
+    locale: language,
+    language,
+    timezone,
+    timezoneOffsetMinutes: offsetMinutes,
     optedIn,
-    tags
+    tags,
+    ...collectDeviceContext()
   };
   if (externalId) {
     body.externalId = externalId;
@@ -214,7 +277,18 @@ async function sendRegistration(token) {
     }
   } catch {
   }
-  await post("/api/mobile-push/register", body);
+  const response = await post("/api/mobile-push/register", body);
+  await handleRegistrationResponse(response);
+}
+async function handleRegistrationResponse(response) {
+  const data = response?.data;
+  const identifier = data?.subscriptionId ?? data?.subscriberId;
+  if (typeof identifier !== "string" || identifier.length === 0) return;
+  if (identifier === subscriptionId) return;
+  subscriptionId = identifier;
+  await persist(STORAGE_SUBSCRIPTION_ID, identifier);
+  debugLog(`subscriptionId=${identifier}`, 3 /* Info */);
+  notifySubscriptionObservers();
 }
 async function sendUnregister() {
   if (!appId) return;
@@ -327,6 +401,7 @@ async function initialize(options) {
   await persist(STORAGE_BASE_URL, baseUrl);
   externalId = await read(STORAGE_EXTERNAL_ID);
   deviceToken = await read(STORAGE_DEVICE_TOKEN);
+  subscriptionId = await read(STORAGE_SUBSCRIPTION_ID);
   const storedOptedIn = await read(STORAGE_OPTED_IN);
   optedIn = storedOptedIn !== "false";
   const storedTags = await read(STORAGE_TAGS);
@@ -533,6 +608,9 @@ function getDeviceId() {
 function getDeviceToken() {
   return deviceToken;
 }
+function getSubscriptionId() {
+  return subscriptionId;
+}
 function addClickListener(listener) {
   clickListeners.add(listener);
   ensureNotificationHandlers();
@@ -597,6 +675,7 @@ var GonderPush = {
   setLogLevel,
   getDeviceId,
   getDeviceToken,
+  getSubscriptionId,
   addClickListener,
   addForegroundLifecycleListener,
   addPermissionObserver,
