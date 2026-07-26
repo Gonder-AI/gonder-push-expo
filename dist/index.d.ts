@@ -44,6 +44,11 @@ interface PushSubscriptionState {
     externalId: string | null;
     /** Gönder subscription id for this installation, assigned on first register. */
     subscriptionId: string | null;
+    /**
+     * Gönder user id this installation belongs to. Null while anonymous; set
+     * once `login()` associates the device with an external id.
+     */
+    userId: string | null;
 }
 type ClickListener = (notification: GonderNotification) => void;
 /** Return `false` to suppress the system banner when a push arrives in foreground. */
@@ -80,6 +85,11 @@ declare function getDeviceToken(): string | null;
  * registration; shown as "Subscription ID" in the dashboard.
  */
 declare function getSubscriptionId(): string | null;
+/**
+ * Gönder user id that owns this installation, shared by every device the same
+ * person logs in on. Null while anonymous.
+ */
+declare function getUserId(): string | null;
 declare function addClickListener(listener: ClickListener): () => void;
 declare function addForegroundLifecycleListener(listener: ForegroundLifecycleListener): () => void;
 declare function addPermissionObserver(observer: PermissionObserver): () => void;
@@ -112,6 +122,7 @@ declare const GonderPush: {
     getDeviceId: typeof getDeviceId;
     getDeviceToken: typeof getDeviceToken;
     getSubscriptionId: typeof getSubscriptionId;
+    getUserId: typeof getUserId;
     addClickListener: typeof addClickListener;
     addForegroundLifecycleListener: typeof addForegroundLifecycleListener;
     addPermissionObserver: typeof addPermissionObserver;

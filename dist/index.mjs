@@ -27,10 +27,12 @@ var STORAGE_BASE_URL = "gonder.push.baseUrl";
 var STORAGE_EXTERNAL_ID = "gonder.push.externalId";
 var STORAGE_DEVICE_TOKEN = "gonder.push.deviceToken";
 var STORAGE_SUBSCRIPTION_ID = "gonder.push.subscriptionId";
+var STORAGE_USER_ID = "gonder.push.userId";
 var STORAGE_OPTED_IN = "gonder.push.optedIn";
 var STORAGE_TAGS = "gonder.push.tags";
 var STORAGE_CONSENT_REQUIRED = "gonder.push.consentRequired";
 var STORAGE_CONSENT_GIVEN = "gonder.push.consentGiven";
+var SECURE_DEVICE_ID = "gonder.push.deviceId";
 var DEFAULT_BASE_URL = "https://gonder.ai";
 var appId = null;
 var baseUrl = DEFAULT_BASE_URL;
@@ -38,6 +40,7 @@ var externalId = null;
 var deviceToken = null;
 var deviceIdCache = null;
 var subscriptionId = null;
+var userId = null;
 var optedIn = true;
 var tags = {};
 var consentRequired = false;
@@ -94,15 +97,59 @@ function createUuid() {
     return v.toString(16);
   });
 }
+function secureStore() {
+  try {
+    const required = __require("expo-secure-store");
+    const module = required.default ?? required;
+    if (typeof module.getItemAsync === "function" && typeof module.setItemAsync === "function") {
+      return module;
+    }
+  } catch {
+  }
+  return null;
+}
+async function readSecureDeviceId() {
+  const store = secureStore();
+  if (!store) return null;
+  try {
+    return await store.getItemAsync(SECURE_DEVICE_ID);
+  } catch (error) {
+    debugLog(`secure read failed: ${String(error)}`, 2 /* Warn */);
+    return null;
+  }
+}
+async function writeSecureDeviceId(value) {
+  const store = secureStore();
+  if (!store) return;
+  try {
+    await store.setItemAsync(SECURE_DEVICE_ID, value, {
+      // Survives reboots without requiring an unlocked device at push time,
+      // and is excluded from iCloud/iTunes backups so a restored backup on a
+      // second phone does not clone this installation's identity.
+      keychainAccessible: store.WHEN_UNLOCKED_THIS_DEVICE_ONLY
+    });
+  } catch (error) {
+    debugLog(`secure write failed: ${String(error)}`, 2 /* Warn */);
+  }
+}
 async function ensureDeviceId() {
   if (deviceIdCache) return deviceIdCache;
-  const existing = await read(STORAGE_DEVICE_ID);
-  if (existing) {
-    deviceIdCache = existing;
-    return existing;
+  const secure = await readSecureDeviceId();
+  if (secure) {
+    deviceIdCache = secure;
+    await persist(STORAGE_DEVICE_ID, secure);
+    return secure;
+  }
+  const legacy = await read(STORAGE_DEVICE_ID);
+  if (legacy) {
+    deviceIdCache = legacy;
+    await writeSecureDeviceId(legacy);
+    debugLog("migrated deviceId into secure storage", 4 /* Debug */);
+    return legacy;
   }
   const created = createUuid();
   deviceIdCache = created;
+  await writeSecureDeviceId(created);
   await persist(STORAGE_DEVICE_ID, created);
   return created;
 }
@@ -122,7 +169,8 @@ function subscriptionState() {
     deviceToken,
     optedIn,
     externalId,
-    subscriptionId
+    subscriptionId,
+    userId
   };
 }
 function notifySubscriptionObservers() {
@@ -282,13 +330,28 @@ async function sendRegistration(token) {
 }
 async function handleRegistrationResponse(response) {
   const data = response?.data;
-  const identifier = data?.subscriptionId ?? data?.subscriberId;
-  if (typeof identifier !== "string" || identifier.length === 0) return;
-  if (identifier === subscriptionId) return;
-  subscriptionId = identifier;
-  await persist(STORAGE_SUBSCRIPTION_ID, identifier);
-  debugLog(`subscriptionId=${identifier}`, 3 /* Info */);
-  notifySubscriptionObservers();
+  if (!data) return;
+  let changed = false;
+  const identifier = data.subscriptionId ?? data.subscriberId;
+  if (typeof identifier === "string" && identifier.length > 0) {
+    if (identifier !== subscriptionId) {
+      subscriptionId = identifier;
+      await persist(STORAGE_SUBSCRIPTION_ID, identifier);
+      debugLog(`subscriptionId=${identifier}`, 3 /* Info */);
+      changed = true;
+    }
+  }
+  const owner = data.userId;
+  const nextUserId = typeof owner === "string" && owner.length > 0 ? owner : null;
+  if ("userId" in data && nextUserId !== userId) {
+    userId = nextUserId;
+    await persist(STORAGE_USER_ID, nextUserId);
+    debugLog(`userId=${nextUserId ?? "anonymous"}`, 3 /* Info */);
+    changed = true;
+  }
+  if (changed) {
+    notifySubscriptionObservers();
+  }
 }
 async function sendUnregister() {
   if (!appId) return;
@@ -402,6 +465,7 @@ async function initialize(options) {
   externalId = await read(STORAGE_EXTERNAL_ID);
   deviceToken = await read(STORAGE_DEVICE_TOKEN);
   subscriptionId = await read(STORAGE_SUBSCRIPTION_ID);
+  userId = await read(STORAGE_USER_ID);
   const storedOptedIn = await read(STORAGE_OPTED_IN);
   optedIn = storedOptedIn !== "false";
   const storedTags = await read(STORAGE_TAGS);
@@ -505,6 +569,8 @@ async function setExternalId(id) {
 async function removeExternalId() {
   externalId = null;
   await persist(STORAGE_EXTERNAL_ID, null);
+  userId = null;
+  await persist(STORAGE_USER_ID, null);
   if (deviceToken) {
     await sendRegistration(deviceToken);
   }
@@ -611,6 +677,9 @@ function getDeviceToken() {
 function getSubscriptionId() {
   return subscriptionId;
 }
+function getUserId() {
+  return userId;
+}
 function addClickListener(listener) {
   clickListeners.add(listener);
   ensureNotificationHandlers();
@@ -676,6 +745,7 @@ var GonderPush = {
   getDeviceId,
   getDeviceToken,
   getSubscriptionId,
+  getUserId,
   addClickListener,
   addForegroundLifecycleListener,
   addPermissionObserver,

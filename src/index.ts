@@ -58,6 +58,11 @@ export interface PushSubscriptionState {
   externalId: string | null;
   /** Gönder subscription id for this installation, assigned on first register. */
   subscriptionId: string | null;
+  /**
+   * Gönder user id this installation belongs to. Null while anonymous; set
+   * once `login()` associates the device with an external id.
+   */
+  userId: string | null;
 }
 
 export type ClickListener = (notification: GonderNotification) => void;
@@ -75,10 +80,17 @@ const STORAGE_BASE_URL = "gonder.push.baseUrl";
 const STORAGE_EXTERNAL_ID = "gonder.push.externalId";
 const STORAGE_DEVICE_TOKEN = "gonder.push.deviceToken";
 const STORAGE_SUBSCRIPTION_ID = "gonder.push.subscriptionId";
+const STORAGE_USER_ID = "gonder.push.userId";
 const STORAGE_OPTED_IN = "gonder.push.optedIn";
 const STORAGE_TAGS = "gonder.push.tags";
 const STORAGE_CONSENT_REQUIRED = "gonder.push.consentRequired";
 const STORAGE_CONSENT_GIVEN = "gonder.push.consentGiven";
+
+/**
+ * SecureStore keys may only contain alphanumerics, `.`, `-`, and `_`, which the
+ * AsyncStorage key already satisfies — kept separate so the two never drift.
+ */
+const SECURE_DEVICE_ID = "gonder.push.deviceId";
 
 const DEFAULT_BASE_URL = "https://gonder.ai";
 
@@ -88,6 +100,7 @@ let externalId: string | null = null;
 let deviceToken: string | null = null;
 let deviceIdCache: string | null = null;
 let subscriptionId: string | null = null;
+let userId: string | null = null;
 let optedIn = true;
 let tags: Record<string, string> = {};
 let consentRequired = false;
@@ -153,15 +166,94 @@ function createUuid(): string {
   });
 }
 
+interface SecureStoreModule {
+  getItemAsync(key: string): Promise<string | null>;
+  setItemAsync(
+    key: string,
+    value: string,
+    options?: Record<string, unknown>
+  ): Promise<void>;
+}
+
+/** `expo-secure-store` is an optional peer dependency. */
+function secureStore(): SecureStoreModule | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const required = require("expo-secure-store") as Record<string, unknown> & {
+      default?: Record<string, unknown>;
+    };
+    const module = (required.default ?? required) as Partial<SecureStoreModule>;
+    if (
+      typeof module.getItemAsync === "function" &&
+      typeof module.setItemAsync === "function"
+    ) {
+      return module as SecureStoreModule;
+    }
+  } catch {
+    // not installed — fall back to AsyncStorage
+  }
+  return null;
+}
+
+async function readSecureDeviceId(): Promise<string | null> {
+  const store = secureStore();
+  if (!store) return null;
+  try {
+    return await store.getItemAsync(SECURE_DEVICE_ID);
+  } catch (error) {
+    debugLog(`secure read failed: ${String(error)}`, LogLevel.Warn);
+    return null;
+  }
+}
+
+async function writeSecureDeviceId(value: string): Promise<void> {
+  const store = secureStore();
+  if (!store) return;
+  try {
+    await store.setItemAsync(SECURE_DEVICE_ID, value, {
+      // Survives reboots without requiring an unlocked device at push time,
+      // and is excluded from iCloud/iTunes backups so a restored backup on a
+      // second phone does not clone this installation's identity.
+      keychainAccessible: (
+        store as unknown as { WHEN_UNLOCKED_THIS_DEVICE_ONLY?: unknown }
+      ).WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+    });
+  } catch (error) {
+    debugLog(`secure write failed: ${String(error)}`, LogLevel.Warn);
+  }
+}
+
+/**
+ * Stable installation id, stored in the Keychain when `expo-secure-store` is
+ * available.
+ *
+ * iOS clears app storage on uninstall but keeps Keychain entries, so a
+ * reinstall reuses this id and updates the existing subscription instead of
+ * creating a duplicate. AsyncStorage is still written as a mirror for installs
+ * without SecureStore, and an id found only there is promoted to the Keychain.
+ */
 async function ensureDeviceId(): Promise<string> {
   if (deviceIdCache) return deviceIdCache;
-  const existing = await read(STORAGE_DEVICE_ID);
-  if (existing) {
-    deviceIdCache = existing;
-    return existing;
+
+  const secure = await readSecureDeviceId();
+  if (secure) {
+    deviceIdCache = secure;
+    // Keep the mirror in step for code paths that read AsyncStorage directly.
+    await persist(STORAGE_DEVICE_ID, secure);
+    return secure;
   }
+
+  const legacy = await read(STORAGE_DEVICE_ID);
+  if (legacy) {
+    deviceIdCache = legacy;
+    await writeSecureDeviceId(legacy);
+    debugLog("migrated deviceId into secure storage", LogLevel.Debug);
+    return legacy;
+  }
+
   const created = createUuid();
   deviceIdCache = created;
+  await writeSecureDeviceId(created);
   await persist(STORAGE_DEVICE_ID, created);
   return created;
 }
@@ -186,6 +278,7 @@ function subscriptionState(): PushSubscriptionState {
     optedIn,
     externalId,
     subscriptionId,
+    userId,
   };
 }
 
@@ -430,18 +523,41 @@ async function sendRegistration(token: string): Promise<void> {
   await handleRegistrationResponse(response);
 }
 
-/** Persists the subscription id the backend assigned to this installation. */
+/**
+ * Persists the subscription id and owning user id the backend assigned to this
+ * installation.
+ */
 async function handleRegistrationResponse(
   response: Record<string, unknown> | null
 ): Promise<void> {
   const data = response?.data as Record<string, unknown> | undefined;
-  const identifier = data?.subscriptionId ?? data?.subscriberId;
-  if (typeof identifier !== "string" || identifier.length === 0) return;
-  if (identifier === subscriptionId) return;
-  subscriptionId = identifier;
-  await persist(STORAGE_SUBSCRIPTION_ID, identifier);
-  debugLog(`subscriptionId=${identifier}`, LogLevel.Info);
-  notifySubscriptionObservers();
+  if (!data) return;
+  let changed = false;
+
+  const identifier = data.subscriptionId ?? data.subscriberId;
+  if (typeof identifier === "string" && identifier.length > 0) {
+    if (identifier !== subscriptionId) {
+      subscriptionId = identifier;
+      await persist(STORAGE_SUBSCRIPTION_ID, identifier);
+      debugLog(`subscriptionId=${identifier}`, LogLevel.Info);
+      changed = true;
+    }
+  }
+
+  // Null is meaningful here: it is how the backend reports an anonymous
+  // subscription after logout, so it must clear the cached user id.
+  const owner = data.userId;
+  const nextUserId = typeof owner === "string" && owner.length > 0 ? owner : null;
+  if ("userId" in data && nextUserId !== userId) {
+    userId = nextUserId;
+    await persist(STORAGE_USER_ID, nextUserId);
+    debugLog(`userId=${nextUserId ?? "anonymous"}`, LogLevel.Info);
+    changed = true;
+  }
+
+  if (changed) {
+    notifySubscriptionObservers();
+  }
 }
 
 async function sendUnregister(): Promise<void> {
@@ -571,6 +687,7 @@ async function initialize(options: GonderPushInitOptions): Promise<void> {
   externalId = await read(STORAGE_EXTERNAL_ID);
   deviceToken = await read(STORAGE_DEVICE_TOKEN);
   subscriptionId = await read(STORAGE_SUBSCRIPTION_ID);
+  userId = await read(STORAGE_USER_ID);
   const storedOptedIn = await read(STORAGE_OPTED_IN);
   optedIn = storedOptedIn !== "false";
   const storedTags = await read(STORAGE_TAGS);
@@ -697,6 +814,10 @@ async function setExternalId(id: string): Promise<void> {
 async function removeExternalId(): Promise<void> {
   externalId = null;
   await persist(STORAGE_EXTERNAL_ID, null);
+  // Detach locally up front so the device never reports a stale owner while
+  // offline; a successful re-register confirms it with userId: null.
+  userId = null;
+  await persist(STORAGE_USER_ID, null);
   if (deviceToken) {
     await sendRegistration(deviceToken);
   }
@@ -827,6 +948,14 @@ function getSubscriptionId(): string | null {
   return subscriptionId;
 }
 
+/**
+ * Gönder user id that owns this installation, shared by every device the same
+ * person logs in on. Null while anonymous.
+ */
+function getUserId(): string | null {
+  return userId;
+}
+
 function addClickListener(listener: ClickListener): () => void {
   clickListeners.add(listener);
   ensureNotificationHandlers();
@@ -901,6 +1030,7 @@ export const GonderPush = {
   getDeviceId,
   getDeviceToken,
   getSubscriptionId,
+  getUserId,
   addClickListener,
   addForegroundLifecycleListener,
   addPermissionObserver,
